@@ -1,0 +1,9 @@
+[package]
+name = "sdkwork-id-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SDKWork unified ID generation: Snowflake int64 and UUID"
+
+[dependencies]
+uuid = { workspace = true }
