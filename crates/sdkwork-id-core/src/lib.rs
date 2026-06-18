@@ -29,9 +29,12 @@
 pub mod snowflake;
 pub mod uuid_gen;
 
-pub use snowflake::{SnowflakeIdGenerator, SnowflakeIdError, SnowflakeProfile};
-pub use snowflake::{default_snowflake_epoch_millis, default_snowflake_profile, max_snowflake_node_id, current_time_millis};
-pub use uuid_gen::{UuidIdGenerator, uuid_v4, uuid_v4_with_prefix};
+pub use snowflake::{
+    current_time_millis, default_snowflake_epoch_millis, default_snowflake_profile,
+    max_snowflake_node_id,
+};
+pub use snowflake::{SnowflakeIdError, SnowflakeIdGenerator, SnowflakeProfile};
+pub use uuid_gen::{uuid_v4, uuid_v4_with_prefix, UuidIdGenerator};
 
 use std::fmt;
 
@@ -67,7 +70,9 @@ impl From<String> for IdGenError {
 
 impl From<&str> for IdGenError {
     fn from(s: &str) -> Self {
-        Self { message: s.to_string() }
+        Self {
+            message: s.to_string(),
+        }
     }
 }
 
@@ -82,7 +87,10 @@ impl From<&str> for IdGenError {
 /// let ids = generate_batch(&gen, 100).unwrap();
 /// assert_eq!(ids.len(), 100);
 /// ```
-pub fn generate_batch(generator: &dyn IdGenerator, count: usize) -> Result<Vec<String>, IdGenError> {
+pub fn generate_batch(
+    generator: &dyn IdGenerator,
+    count: usize,
+) -> Result<Vec<String>, IdGenError> {
     let mut ids = Vec::with_capacity(count);
     for _ in 0..count {
         ids.push(generator.next_id()?);
@@ -94,16 +102,18 @@ pub fn generate_batch(generator: &dyn IdGenerator, count: usize) -> Result<Vec<S
 ///
 /// Returns the decoded parts if valid: (node_id, timestamp_delta_millis, sequence).
 pub fn validate_snowflake_id(id_str: &str) -> Result<(u16, u64, u16), IdGenError> {
-    let id: i64 = id_str.parse().map_err(|_| IdGenError::from("invalid Snowflake ID format"))?;
+    let id: i64 = id_str
+        .parse()
+        .map_err(|_| IdGenError::from("invalid Snowflake ID format"))?;
     if id <= 0 {
         return Err(IdGenError::from("Snowflake ID must be positive"));
     }
-    
+
     let bits = id as u64;
     let node_id = ((bits >> 12) & 0x3FF) as u16; // 10 bits
     let timestamp_delta = bits >> 22; // 41 bits
     let sequence = (bits & 0xFFF) as u16; // 12 bits
-    
+
     Ok((node_id, timestamp_delta, sequence))
 }
 
@@ -148,7 +158,7 @@ mod tests {
         let gen = SnowflakeIdGenerator::new(42).unwrap();
         let id = gen.generate_at(1_704_067_200_001).unwrap();
         let id_str = id.to_string();
-        
+
         let (node_id, _timestamp, _sequence) = validate_snowflake_id(&id_str).unwrap();
         assert_eq!(node_id, 42);
     }

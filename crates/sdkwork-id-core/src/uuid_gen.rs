@@ -11,7 +11,9 @@ pub struct UuidIdGenerator {
 impl UuidIdGenerator {
     /// Create a generator with an optional prefix (e.g. "user_").
     pub fn new(prefix: &str) -> Self {
-        Self { prefix: prefix.to_string() }
+        Self {
+            prefix: prefix.to_string(),
+        }
     }
 }
 
@@ -19,7 +21,9 @@ impl IdGenerator for UuidIdGenerator {
     fn next_id(&self) -> Result<String, IdGenError> {
         Ok(format!("{}{}", self.prefix, uuid_to_string(Uuid::new_v4())))
     }
-    fn label(&self) -> &str { "uuid-v4" }
+    fn label(&self) -> &str {
+        "uuid-v4"
+    }
 }
 
 /// UUID v5 namespace-based ID generator (deterministic).
@@ -30,12 +34,18 @@ pub struct UuidV5Generator {
 
 impl UuidV5Generator {
     pub fn new(namespace: Uuid, prefix: &str) -> Self {
-        Self { namespace, prefix: prefix.to_string() }
+        Self {
+            namespace,
+            prefix: prefix.to_string(),
+        }
     }
 
     pub fn from_namespace_str(namespace: &str, prefix: &str) -> Result<Self, uuid::Error> {
         let ns = Uuid::parse_str(namespace)?;
-        Ok(Self { namespace: ns, prefix: prefix.to_string() })
+        Ok(Self {
+            namespace: ns,
+            prefix: prefix.to_string(),
+        })
     }
 
     pub fn generate_for(&self, name: &str) -> Result<String, uuid::Error> {
@@ -49,7 +59,9 @@ impl IdGenerator for UuidV5Generator {
         // Fallback: use v4 when no name is provided
         Ok(format!("{}{}", self.prefix, uuid_to_string(Uuid::new_v4())))
     }
-    fn label(&self) -> &str { "uuid-v5" }
+    fn label(&self) -> &str {
+        "uuid-v5"
+    }
 }
 
 /// Convenience: generate a UUID v4 string.
@@ -93,7 +105,9 @@ mod tests {
 
     #[test]
     fn uuid_v5_deterministic() {
-        let gen = UuidV5Generator::from_namespace_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8", "user_").unwrap();
+        let gen =
+            UuidV5Generator::from_namespace_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8", "user_")
+                .unwrap();
         let a = gen.generate_for("alice").unwrap();
         let b = gen.generate_for("alice").unwrap();
         let c = gen.generate_for("bob").unwrap();

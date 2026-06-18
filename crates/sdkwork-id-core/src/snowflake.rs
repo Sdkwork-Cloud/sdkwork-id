@@ -34,7 +34,10 @@ pub enum SnowflakeIdError {
     /// Clock moved backwards (beyond drift tolerance)
     ClockMovedBackwards { last_millis: u64, now_millis: u64 },
     /// Timestamp overflow (69+ years since epoch)
-    TimestampOverflow { delta_millis: u64, max_delta_millis: u64 },
+    TimestampOverflow {
+        delta_millis: u64,
+        max_delta_millis: u64,
+    },
     /// Sequence exhausted (4096 IDs in one millisecond)
     SequenceExhausted { millis: u64 },
     /// System time error
@@ -46,16 +49,34 @@ pub enum SnowflakeIdError {
 impl fmt::Display for SnowflakeIdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidNodeId { node_id, max_node_id } => 
-                write!(f, "invalid node_id={node_id}, max={max_node_id}"),
-            Self::ClockBeforeEpoch { now_millis, epoch_millis } => 
-                write!(f, "clock before epoch: now={now_millis}, epoch={epoch_millis}"),
-            Self::ClockMovedBackwards { last_millis, now_millis } => 
-                write!(f, "clock moved backwards: last={last_millis}, now={now_millis}"),
-            Self::TimestampOverflow { delta_millis, max_delta_millis } => 
-                write!(f, "timestamp overflow: delta={delta_millis}, max={max_delta_millis}"),
-            Self::SequenceExhausted { millis } => 
-                write!(f, "sequence exhausted at millis={millis}"),
+            Self::InvalidNodeId {
+                node_id,
+                max_node_id,
+            } => write!(f, "invalid node_id={node_id}, max={max_node_id}"),
+            Self::ClockBeforeEpoch {
+                now_millis,
+                epoch_millis,
+            } => write!(
+                f,
+                "clock before epoch: now={now_millis}, epoch={epoch_millis}"
+            ),
+            Self::ClockMovedBackwards {
+                last_millis,
+                now_millis,
+            } => write!(
+                f,
+                "clock moved backwards: last={last_millis}, now={now_millis}"
+            ),
+            Self::TimestampOverflow {
+                delta_millis,
+                max_delta_millis,
+            } => write!(
+                f,
+                "timestamp overflow: delta={delta_millis}, max={max_delta_millis}"
+            ),
+            Self::SequenceExhausted { millis } => {
+                write!(f, "sequence exhausted at millis={millis}")
+            }
             Self::SystemTime(e) => write!(f, "system time error: {e}"),
             Self::StatePoisoned => write!(f, "generator state poisoned"),
         }
@@ -101,15 +122,18 @@ impl SnowflakeIdGenerator {
     /// Create a new Snowflake ID generator with a custom epoch.
     pub fn with_epoch(node_id: u16, epoch_millis: u64) -> Result<Self, SnowflakeIdError> {
         if node_id > MAX_NODE_ID {
-            return Err(SnowflakeIdError::InvalidNodeId { 
-                node_id, 
-                max_node_id: MAX_NODE_ID 
+            return Err(SnowflakeIdError::InvalidNodeId {
+                node_id,
+                max_node_id: MAX_NODE_ID,
             });
         }
         Ok(Self {
             node_id,
             epoch_millis,
-            state: Arc::new(Mutex::new(SnowflakeState { last_millis: 0, sequence: 0 })),
+            state: Arc::new(Mutex::new(SnowflakeState {
+                last_millis: 0,
+                sequence: 0,
+            })),
         })
     }
 
@@ -120,7 +144,10 @@ impl SnowflakeIdGenerator {
 
     /// Generate a new ID at a specific timestamp (useful for testing).
     pub fn generate_at(&self, now_millis: u64) -> Result<i64, SnowflakeIdError> {
-        let mut state = self.state.lock().map_err(|_| SnowflakeIdError::StatePoisoned)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SnowflakeIdError::StatePoisoned)?;
         self.next_id_at(now_millis, &mut state)
     }
 
@@ -135,20 +162,24 @@ impl SnowflakeIdGenerator {
     }
 
     /// Internal: generate next ID at given timestamp.
-    fn next_id_at(&self, now_millis: u64, state: &mut SnowflakeState) -> Result<i64, SnowflakeIdError> {
+    fn next_id_at(
+        &self,
+        now_millis: u64,
+        state: &mut SnowflakeState,
+    ) -> Result<i64, SnowflakeIdError> {
         // Check clock before epoch
         if now_millis < self.epoch_millis {
-            return Err(SnowflakeIdError::ClockBeforeEpoch { 
-                now_millis, 
-                epoch_millis: self.epoch_millis 
+            return Err(SnowflakeIdError::ClockBeforeEpoch {
+                now_millis,
+                epoch_millis: self.epoch_millis,
             });
         }
 
         // Check for excessive clock drift (beyond 100ms tolerance)
         if state.last_millis > now_millis + MAX_CLOCK_DRIFT_MS {
-            return Err(SnowflakeIdError::ClockMovedBackwards { 
-                last_millis: state.last_millis, 
-                now_millis 
+            return Err(SnowflakeIdError::ClockMovedBackwards {
+                last_millis: state.last_millis,
+                now_millis,
             });
         }
 
@@ -166,9 +197,9 @@ impl SnowflakeIdGenerator {
         // Calculate delta from epoch
         let delta_millis = now_millis - self.epoch_millis;
         if delta_millis > MAX_TIMESTAMP_DELTA {
-            return Err(SnowflakeIdError::TimestampOverflow { 
-                delta_millis, 
-                max_delta_millis: MAX_TIMESTAMP_DELTA 
+            return Err(SnowflakeIdError::TimestampOverflow {
+                delta_millis,
+                max_delta_millis: MAX_TIMESTAMP_DELTA,
             });
         }
 
