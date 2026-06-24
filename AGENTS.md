@@ -16,3 +16,10 @@ Canonical SDKWORK specs path: `../sdkwork-specs/README.md`
 - No external dependencies beyond `uuid`
 - All public types implement `IdGenerator` trait
 - Deterministic generation via `generate_at()` for testing
+
+## Documentation Canon
+
+- [docs/README.md](docs/README.md)
+- [docs/product/prd/PRD.md](docs/product/prd/PRD.md)
+- [docs/architecture/tech/TECH_ARCHITECTURE.md](docs/architecture/tech/TECH_ARCHITECTURE.md)
+
