@@ -18,3 +18,7 @@ node_modules/
 .env.production.local
 .env.postgres
 .env.release.local
+
+# SDKWork local runtime state
+.runtime/
+**/.runtime/
