@@ -1,4 +1,5 @@
 # sdkwork-id
+repository-kind: foundation-dependency
 
 SDKWork unified ID generation library.
 
