@@ -33,7 +33,9 @@ pub use snowflake::{
     current_time_millis, default_snowflake_epoch_millis, default_snowflake_profile,
     max_snowflake_node_id,
 };
-pub use snowflake::{SnowflakeIdError, SnowflakeIdGenerator, SnowflakeProfile};
+pub use snowflake::{
+    SnowflakeIdError, SnowflakeIdGenerator, SnowflakeLeaseGuard, SnowflakeProfile,
+};
 pub use uuid_gen::{uuid_v4, uuid_v4_with_prefix, UuidIdGenerator};
 
 use std::fmt;

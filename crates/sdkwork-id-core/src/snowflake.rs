@@ -1,6 +1,7 @@
 use std::fmt;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::{i64_to_string, IdGenError, IdGenerator};
 
@@ -27,6 +28,8 @@ const MAX_CLOCK_DRIFT_MS: u64 = 100;
 /// Snowflake ID generation errors
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum SnowflakeIdError {
+    /// The distributed node lease is no longer valid.
+    LeaseUnavailable,
     /// Invalid node ID (must be 0-1023)
     InvalidNodeId { node_id: u16, max_node_id: u16 },
     /// System clock is before the epoch
@@ -49,6 +52,7 @@ pub enum SnowflakeIdError {
 impl fmt::Display for SnowflakeIdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::LeaseUnavailable => write!(f, "snowflake node lease is unavailable"),
             Self::InvalidNodeId {
                 node_id,
                 max_node_id,
@@ -96,6 +100,7 @@ pub struct SnowflakeIdGenerator {
     node_id: u16,
     epoch_millis: u64,
     state: Arc<Mutex<SnowflakeState>>,
+    lease_guard: Option<Arc<SnowflakeLeaseGuard>>,
 }
 
 impl std::fmt::Debug for SnowflakeIdGenerator {
@@ -134,16 +139,52 @@ impl SnowflakeIdGenerator {
                 last_millis: 0,
                 sequence: 0,
             })),
+            lease_guard: None,
         })
+    }
+
+    /// Attach a distributed lease guard to this generator.
+    ///
+    /// Database-backed allocators use this guard to fence ID generation when
+    /// the node lease can no longer be proven valid. The check is a single
+    /// relaxed atomic load on the generation hot path.
+    #[must_use]
+    pub fn with_lease_guard(mut self, lease_guard: Arc<SnowflakeLeaseGuard>) -> Self {
+        self.lease_guard = Some(lease_guard);
+        self
     }
 
     /// Generate a new ID using the current system time.
     pub fn generate(&self) -> Result<i64, SnowflakeIdError> {
-        self.generate_at(current_time_millis()?)
+        let now_millis = current_time_millis()?;
+        self.generate_at_with_wall_clock(now_millis, now_millis)
     }
 
     /// Generate a new ID at a specific timestamp (useful for testing).
     pub fn generate_at(&self, now_millis: u64) -> Result<i64, SnowflakeIdError> {
+        let wall_clock_millis = current_time_millis()?;
+        self.generate_at_with_wall_clock(now_millis, wall_clock_millis)
+    }
+
+    fn generate_at_with_wall_clock(
+        &self,
+        now_millis: u64,
+        wall_clock_millis: u64,
+    ) -> Result<i64, SnowflakeIdError> {
+        if self
+            .lease_guard
+            .as_ref()
+            .is_some_and(|guard| !guard.allows(wall_clock_millis))
+        {
+            return Err(SnowflakeIdError::LeaseUnavailable);
+        }
+        if self.lease_guard.is_some() && now_millis.abs_diff(wall_clock_millis) > MAX_CLOCK_DRIFT_MS
+        {
+            return Err(SnowflakeIdError::ClockMovedBackwards {
+                last_millis: wall_clock_millis,
+                now_millis,
+            });
+        }
         let mut state = self
             .state
             .lock()
@@ -176,26 +217,31 @@ impl SnowflakeIdGenerator {
         }
 
         // Check for excessive clock drift (beyond 100ms tolerance)
-        if state.last_millis > now_millis + MAX_CLOCK_DRIFT_MS {
+        if state.last_millis > now_millis.saturating_add(MAX_CLOCK_DRIFT_MS) {
             return Err(SnowflakeIdError::ClockMovedBackwards {
                 last_millis: state.last_millis,
                 now_millis,
             });
         }
 
-        // Handle same millisecond - increment sequence
-        if state.last_millis == now_millis {
+        // Pin small clock rollbacks to the last logical millisecond. Never
+        // move the encoded timestamp backwards or reset sequence at an older
+        // timestamp, otherwise a clock recovery can duplicate an earlier ID.
+        let logical_millis = state.last_millis.max(now_millis);
+        if state.last_millis == logical_millis {
             if state.sequence == MAX_SEQUENCE {
-                return Err(SnowflakeIdError::SequenceExhausted { millis: now_millis });
+                return Err(SnowflakeIdError::SequenceExhausted {
+                    millis: logical_millis,
+                });
             }
             state.sequence += 1;
         } else {
-            state.last_millis = now_millis;
+            state.last_millis = logical_millis;
             state.sequence = 0;
         }
 
         // Calculate delta from epoch
-        let delta_millis = now_millis - self.epoch_millis;
+        let delta_millis = logical_millis - self.epoch_millis;
         if delta_millis > MAX_TIMESTAMP_DELTA {
             return Err(SnowflakeIdError::TimestampOverflow {
                 delta_millis,
@@ -210,6 +256,76 @@ impl SnowflakeIdGenerator {
 
         Ok(value as i64)
     }
+}
+
+/// Lock-free safety guard for a database-backed Snowflake node lease.
+#[derive(Debug)]
+pub struct SnowflakeLeaseGuard {
+    available: AtomicBool,
+    valid_until_millis: AtomicU64,
+    valid_until_monotonic_millis: AtomicU64,
+}
+
+impl SnowflakeLeaseGuard {
+    pub fn new(valid_until_millis: u64) -> Self {
+        let remaining =
+            valid_until_millis.saturating_sub(current_time_millis().unwrap_or(u64::MAX));
+        Self {
+            available: AtomicBool::new(true),
+            valid_until_millis: AtomicU64::new(valid_until_millis),
+            valid_until_monotonic_millis: AtomicU64::new(
+                monotonic_millis().saturating_add(remaining),
+            ),
+        }
+    }
+
+    /// Extend the locally enforced lease deadline after a successful fenced heartbeat.
+    pub fn renew_until(&self, valid_until_millis: u64) {
+        let remaining =
+            valid_until_millis.saturating_sub(current_time_millis().unwrap_or(u64::MAX));
+        self.valid_until_millis
+            .store(valid_until_millis, Ordering::Release);
+        self.valid_until_monotonic_millis.store(
+            monotonic_millis().saturating_add(remaining),
+            Ordering::Release,
+        );
+    }
+
+    /// Extend the local deadline by a duration measured with a monotonic
+    /// clock. This cannot be prolonged by system-clock rollback.
+    pub fn renew_for(&self, ttl: Duration) {
+        let ttl_millis = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+        self.valid_until_millis.store(
+            current_time_millis()
+                .unwrap_or(u64::MAX)
+                .saturating_add(ttl_millis),
+            Ordering::Release,
+        );
+        self.valid_until_monotonic_millis.store(
+            monotonic_millis().saturating_add(ttl_millis),
+            Ordering::Release,
+        );
+    }
+
+    /// Permanently fence this generator instance.
+    pub fn fence(&self) {
+        self.available.store(false, Ordering::Release);
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.available.load(Ordering::Acquire)
+    }
+
+    pub fn allows(&self, now_millis: u64) -> bool {
+        self.is_available()
+            && now_millis < self.valid_until_millis.load(Ordering::Acquire)
+            && monotonic_millis() < self.valid_until_monotonic_millis.load(Ordering::Acquire)
+    }
+}
+
+fn monotonic_millis() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 impl IdGenerator for SnowflakeIdGenerator {
@@ -301,6 +417,54 @@ mod tests {
     }
 
     #[test]
+    fn lease_guard_fences_generation_at_deadline() {
+        let wall_clock = current_time_millis().unwrap();
+        let guard = Arc::new(SnowflakeLeaseGuard::new(wall_clock.saturating_sub(1)));
+        let generator = SnowflakeIdGenerator::new(1)
+            .unwrap()
+            .with_lease_guard(guard.clone());
+
+        assert_eq!(
+            generator.generate_at(wall_clock),
+            Err(SnowflakeIdError::LeaseUnavailable)
+        );
+
+        guard.renew_until(wall_clock + 10_000);
+        assert!(generator.generate_at(wall_clock).is_ok());
+        guard.fence();
+        assert_eq!(
+            generator.generate_at(wall_clock),
+            Err(SnowflakeIdError::LeaseUnavailable)
+        );
+    }
+
+    #[test]
+    fn lease_guard_requires_wall_and_monotonic_deadlines() {
+        let wall_clock = current_time_millis().unwrap();
+        let guard = SnowflakeLeaseGuard::new(wall_clock + 10_000);
+        assert!(guard.allows(wall_clock));
+
+        guard
+            .valid_until_monotonic_millis
+            .store(monotonic_millis(), Ordering::Release);
+        assert!(!guard.allows(wall_clock));
+    }
+
+    #[test]
+    fn leased_generator_rejects_historical_timestamp_override() {
+        let wall_clock = current_time_millis().unwrap();
+        let guard = Arc::new(SnowflakeLeaseGuard::new(wall_clock + 10_000));
+        let generator = SnowflakeIdGenerator::new(1)
+            .unwrap()
+            .with_lease_guard(guard);
+
+        assert!(matches!(
+            generator.generate_at(wall_clock - MAX_CLOCK_DRIFT_MS - 1),
+            Err(SnowflakeIdError::ClockMovedBackwards { .. })
+        ));
+    }
+
+    #[test]
     fn snowflake_rejects_clock_rollback() {
         // Use timestamps after the default epoch, with a large backward jump
         let gen = SnowflakeIdGenerator::with_epoch(1, 1_700_000_000_000).unwrap();
@@ -317,9 +481,13 @@ mod tests {
         // Use timestamps after the default epoch (2024-01-01 = 1704067200000)
         let gen = SnowflakeIdGenerator::new(1).unwrap();
         let t1 = gen.generate_at(1_704_067_200_001).unwrap();
-        // Clock moves back by 50ms (within tolerance)
-        let t2 = gen.generate_at(1_704_067_200_050).unwrap();
+        // Clock moves back by 50ms (within tolerance), then recovers.
+        let t2 = gen.generate_at(1_704_067_200_000).unwrap();
+        let t3 = gen.generate_at(1_704_067_200_001).unwrap();
         assert!(t1 < t2);
+        assert!(t2 < t3);
+        assert_ne!(t1, t2);
+        assert_ne!(t2, t3);
     }
 
     #[test]
